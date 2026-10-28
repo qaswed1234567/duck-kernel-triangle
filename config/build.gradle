@@ -1,0 +1,4 @@
+// 鸭子内核 APK 工程 —— 顶层构建脚本
+plugins {
+    id 'com.android.application' version '8.1.4' apply false
+}
