@@ -1,4 +1,5 @@
-// 鸭子内核 APK 工程 —— 顶层构建脚本
+// Deprecated: this file is kept only as a compatibility stub.
+// Use the canonical Gradle config under: config/
 plugins {
-    id 'com.android.application' version '8.1.4' apply false
+    // Intentionally left blank to avoid accidental use.
 }
