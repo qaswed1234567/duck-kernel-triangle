@@ -1,0 +1,21 @@
+name: benign-reach-probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: benign reachability probe (control + target, zero attack traffic)
+        run: |
+          echo "=== control: example.com ==="
+          curl -sS -m 20 -o /dev/null -w "example.com -> HTTP %{http_code} in %{time_total}s\n" https://example.com || echo "example.com FAILED"
+          echo "=== target: 119.28.135.153 raw TCP/443 ==="
+          timeout 20 bash -c 'cat < /dev/null > /dev/tcp/119.28.135.153/443' && echo "119.28.135.153:443 TCP OPEN" || echo "119.28.135.153:443 TCP FAILED/TIMEOUT"
+          echo "=== target: 119.28.135.153 raw TCP/80 ==="
+          timeout 20 bash -c 'cat < /dev/null > /dev/tcp/119.28.135.153/80' && echo "119.28.135.153:80 TCP OPEN" || echo "119.28.135.153:80 TCP FAILED/TIMEOUT"
+          echo "=== target: 119.28.135.153 HTTPS (skip-cert) ==="
+          curl -skS -m 20 -o /dev/null -w "119.28.135.153:443 -> HTTP %{http_code} in %{time_total}s\n" https://119.28.135.153 || echo "HTTPS FAILED"
+          echo "=== target: https://yazinb.icu ==="
+          curl -skS -m 20 -o /dev/null -w "yazinb.icu -> HTTP %{http_code} in %{time_total}s\n" https://yazinb.icu || echo "yazinb.icu FAILED"
+          echo "=== target: https://pan.yazinb.icu ==="
+          curl -skS -m 20 -o /dev/null -w "pan.yazinb.icu -> HTTP %{http_code} in %{time_total}s\n" https://pan.yazinb.icu || echo "pan.yazinb.icu FAILED"
