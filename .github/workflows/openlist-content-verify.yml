@@ -1,0 +1,39 @@
+name: openlist-content-verify
+on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify OpenList real-file content-read capability via guest/unauth (GitHub relay, zero own-IP traffic)
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          echo "=== [1] login guest ==="
+          LOGIN=$(curl -skS -m 20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}')
+          TOKEN=$(echo "$LOGIN" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))" 2>/dev/null)
+          echo "guest_token_len=${#TOKEN}"
+          AUTH="Authorization: ${TOKEN}"
+          list_dir () { local p="$1"; local mode="$2"; local hdr=(); [ "$mode" = "auth" ] && hdr=(-H "$AUTH"); curl -skS -m 30 -X POST "$B/api/fs/list" "${hdr[@]}" -H "Content-Type: application/json" -d "{\"path\":\"$p\",\"page\":1,\"per_page\":500,\"refresh\":false}" -o /tmp/l.json -w "LIST $mode $p -> HTTP %{http_code} bytes=$(wc -c < /tmp/l.json)\n"; }
+          content_try () { local f="$1"; local mode="$2"; local hdr=(); [ "$mode" = "auth" ] && hdr=(-H "$AUTH"); curl -skS -m 60 -X POST "$B/api/fs/content" "${hdr[@]}" -H "Content-Type: application/json" -d "{\"path\":\"$f\"}" -o /tmp/c.bin -w "$mode $f -> HTTP %{http_code} bytes=$(wc -c < /tmp/c.bin)\n"; echo "  sha256head=$(sha256sum /tmp/c.bin|cut -c1-16) b64head300=$(head -c 300 /tmp/c.bin|base64 -w0)"; }
+          echo "=== [2] FULL root listing (all entries) ==="
+          list_dir "/" "noauth"
+          python3 -c "import json;d=json.load(open('/tmp/l.json'));c=d.get('data',{}).get('content',[]);print('ROOT entries:');[print('  ',repr(x.get('name')),'is_dir=',x.get('is_dir'),'size=',x.get('size')) for x in c]" 2>/dev/null
+          echo "=== [3] first real FILE at root -> test content ==="
+          ROOTFILE=$(python3 -c "import json;d=json.load(open('/tmp/l.json'));c=d.get('data',{}).get('content',[]);f=[x.get('name') for x in c if not x.get('is_dir')];print(f[0] if f else '')" 2>/dev/null)
+          echo "ROOTFILE=[$ROOTFILE]"
+          if [ -n "$ROOTFILE" ]; then echo ">> content /$ROOTFILE"; content_try "/$ROOTFILE" "noauth"; content_try "/$ROOTFILE" "auth"; fi
+          echo "=== [4] drill first real DIR -> find file -> test content ==="
+          ROOTDIR=$(python3 -c "import json;d=json.load(open('/tmp/l.json'));c=d.get('data',{}).get('content',[]);f=[x.get('name') for x in c if x.get('is_dir')];print(f[0] if f else '')" 2>/dev/null)
+          echo "ROOTDIR=[$ROOTDIR]"
+          if [ -n "$ROOTDIR" ]; then
+            list_dir "/$ROOTDIR" "noauth"
+            python3 -c "import json;d=json.load(open('/tmp/l.json'));c=d.get('data',{}).get('content',[]);print('SUB entries:');[print('  ',repr(x.get('name')),'is_dir=',x.get('is_dir'),'size=',x.get('size')) for x in c]" 2>/dev/null
+            SUBFILE=$(python3 -c "import json;d=json.load(open('/tmp/l.json'));c=d.get('data',{}).get('content',[]);f=[x.get('name') for x in c if not x.get('is_dir')];print(f[0] if f else '')" 2>/dev/null)
+            echo "SUBFILE=[$SUBFILE]"
+            if [ -n "$SUBFILE" ]; then echo ">> content /$ROOTDIR/$SUBFILE"; content_try "/$ROOTDIR/$SUBFILE" "noauth"; content_try "/$ROOTDIR/$SUBFILE" "auth"; fi
+          fi
+          echo "=== [5] also try /artex.exe and /data once more (full bytes) ==="
+          content_try "/artex.exe" "noauth"
+          content_try "/data" "noauth"
+          echo "=== VERIFY DONE ==="
