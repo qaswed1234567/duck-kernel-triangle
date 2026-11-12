@@ -1,0 +1,31 @@
+name: openlist-login-sanity
+on:
+  workflow_dispatch:
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: OpenList login sanity probe (fresh GitHub IP)
+        run: |
+          set +e
+          echo "=== runner outbound IP ==="
+          curl -skS -m 15 https://api.ipify.org; echo
+          echo "=== reachability GET / ==="
+          curl -skS -m 20 -o /tmp/idx.txt -w "HTTP %{http_code} len=%{size_download}\n" https://pan.yazinb.icu/
+          echo "--- index head ---"; head -c 400 /tmp/idx.txt | tr -d '\n'; echo
+          login(){
+            local U="$1" P="$2"
+            curl -skS -m 20 -o /tmp/body.txt -w "HTTP %{http_code}" -X POST "https://pan.yazinb.icu/api/auth/login" \
+              -H "Content-Type: application/json" \
+              -d "{\"username\":\"$U\",\"password\":\"$P\"}" > /tmp/code.txt 2>/dev/null
+            local C=$(cat /tmp/code.txt)
+            local B=$(head -c 600 /tmp/body.txt | tr -d '\n')
+            echo "LOGIN user='$U' pass='$P' -> $C | body=$B"
+          }
+          echo "=== baseline guest/guest (expect 200 + token) ==="
+          login guest guest
+          echo
+          echo "=== one bogus attempt admin/admin123 (measure fail/lock format) ==="
+          login admin admin123
+          echo
+          echo "=== SANITY DONE ==="
