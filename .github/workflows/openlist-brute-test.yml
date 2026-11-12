@@ -9,12 +9,12 @@ jobs:
       max-parallel: 18
       matrix:
         include:
-      - user: "guest"
-        pass: "guest"
-      - user: "admin"
-        pass: "admin123"
-      - user: "flim#flam!@x"
-        pass: "pass@word#1"
+          - user: "guest"
+            pass: "guest"
+          - user: "admin"
+            pass: "admin123"
+          - user: "flim#flam!@x"
+            pass: "pass@word#1"
     steps:
       - name: test
         run: |
